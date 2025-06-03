@@ -1,10 +1,15 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from datetime import datetime
+import threading
 import re
 
-LOG_PATTERN = re.compile(
+RSYSLOG_PATTERN = re.compile(
     r'^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[\+\-]\d{2}:\d{2})) (?P<host>\S+) (?P<process>\S+?): (?P<message>.+)$'
+)
+
+WINDOWS_LOG_PATTERN = re.compile(
+    r'^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[\+\-]\d{2}:\d{2}))\s+(?P<host>\S+)\s+(?P<source>\S+)\s+(?P<fields>.+)$'
 )
 
 class LogEntry:
@@ -14,11 +19,8 @@ class LogEntry:
         self.process = process
         self.message = message
 
-    def __repr__(self):
-        return f"{self.timestamp} {self.host} {self.process}: {self.message}"
-
-def parse_log_line(line, year=None):  # year no longer needed
-    match = LOG_PATTERN.match(line)
+def parse_rsyslog_line(line):
+    match = RSYSLOG_PATTERN.match(line)
     if not match:
         return None
     try:
@@ -27,36 +29,33 @@ def parse_log_line(line, year=None):  # year no longer needed
     except ValueError:
         return None
 
-def read_logs(file_path, year):
-    entries = []
-    with open(file_path, 'r') as f:
-        for line in f:
-            entry = parse_log_line(line, year)
-            if entry:
-                entries.append(entry)
-    return sorted(entries, key=lambda e: e.timestamp)
+def parse_windows_log_line(line):
+    match = WINDOWS_LOG_PATTERN.match(line)
+    if not match:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(match.group('timestamp'))
+        host = match.group('host')
+        process = match.group('source')
+        fields = match.group('fields').replace("#011", "\t").split("\t")
+        message = " ".join(fields[11:]).strip() if len(fields) > 11 else " ".join(fields)
+        return LogEntry(timestamp, host, process, message)
+    except Exception:
+        return None
 
-def filter_logs(entries, process=None, keyword=None, start_time=None, end_time=None):
-    filtered = []
-    for entry in entries:
-        if process and process.lower() not in entry.process.lower():
-            continue
-        if keyword and keyword.lower() not in entry.message.lower():
-            continue
-        if start_time and entry.timestamp < start_time:
-            continue
-        if end_time and entry.timestamp > end_time:
-            continue
-        filtered.append(entry)
-    return filtered
+def read_logs_generator(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            entry = parse_rsyslog_line(line) or parse_windows_log_line(line)
+            if entry:
+                yield entry
 
 class LogViewerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("rsyslog Viewer")
+        self.root.title("Universal Log Viewer")
         self.log_entries = []
-        self.year = datetime.now().year
-
         self.create_widgets()
 
     def create_widgets(self):
@@ -82,6 +81,9 @@ class LogViewerApp:
 
         tk.Button(frame, text="Filter Logs", command=self.filter_and_display).grid(row=1, column=4)
 
+        self.status_label = tk.Label(self.root, text="", anchor="w")
+        self.status_label.pack(fill="x")
+
         self.tree = ttk.Treeview(self.root, columns=("Time", "Host", "Process", "Message"), show='headings')
         for col in self.tree["columns"]:
             self.tree.heading(col, text=col)
@@ -95,11 +97,24 @@ class LogViewerApp:
     def open_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Log Files", "*.log *.txt"), ("All Files", "*.*")])
         if file_path:
-            try:
-                self.log_entries = read_logs(file_path, self.year)
-                self.display_logs(self.log_entries)
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to read log file:\n{e}")
+            self.status_label.config(text="Loading in background...")
+            self.tree.delete(*self.tree.get_children())
+            thread = threading.Thread(target=self.load_logs_thread, args=(file_path,))
+            thread.start()
+
+    def load_logs_thread(self, file_path):
+        entries = []
+        count = 0
+        for entry in read_logs_generator(file_path):
+            entries.append(entry)
+            count += 1
+
+        entries.sort(key=lambda e: e.timestamp)
+        self.log_entries = entries
+
+        # Schedule GUI update in main thread
+        self.root.after(0, self.display_logs, entries)
+        self.root.after(0, lambda: self.status_label.config(text=f"Loaded {count} entries."))
 
     def parse_time(self, timestr):
         try:
@@ -113,13 +128,39 @@ class LogViewerApp:
         end_time = self.parse_time(self.end_entry.get())
         process = self.process_entry.get().strip()
         keyword = self.keyword_entry.get().strip()
-        filtered = filter_logs(self.log_entries, process, keyword, start_time, end_time)
+
+        filtered = []
+        for entry in self.log_entries:
+            if process and process.lower() not in entry.process.lower():
+                continue
+            if keyword and keyword.lower() not in entry.message.lower():
+                continue
+            if start_time and entry.timestamp < start_time:
+                continue
+            if end_time and entry.timestamp > end_time:
+                continue
+            filtered.append(entry)
+
         self.display_logs(filtered)
+        self.status_label.config(text=f"{len(filtered)} entries matched filter.")
 
     def display_logs(self, logs):
         self.tree.delete(*self.tree.get_children())
-        for entry in logs:
-            self.tree.insert("", "end", values=(entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"), entry.host, entry.process, entry.message))
+
+        def batch_insert(index):
+            BATCH_SIZE = 500
+            end = min(index + BATCH_SIZE, len(logs))
+            for entry in logs[index:end]:
+                self.tree.insert("", "end", values=(
+                    entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    entry.host,
+                    entry.process,
+                    entry.message
+                ))
+            if end < len(logs):
+                self.root.after(1, batch_insert, end)
+
+        batch_insert(0)
 
 if __name__ == "__main__":
     root = tk.Tk()
