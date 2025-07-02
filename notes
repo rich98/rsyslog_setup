@@ -1,0 +1,56 @@
+
+
+🧱 For APT (Debian/Ubuntu)
+To host your own .deb packages:
+
+1. Create a directory structure
+bash
+mkdir -p ~/myrepo/{conf,dists,incoming,pool}
+2. Install reprepro
+bash
+sudo apt install reprepro
+3. Configure your repo
+Create ~/myrepo/conf/distributions:
+
+
+Codename: focal
+Components: main
+Architectures: amd64
+SignWith: yes
+4. Add packages
+
+reprepro -b ~/myrepo includedeb focal your-package.deb
+5. Serve it
+Host it via a web server (like Nginx or Apache) and add the repo to clients:
+
+
+echo "deb [trusted=yes] http://yourserver.com/myrepo focal main" | sudo tee /etc/apt/sources.list.d/myrepo.list
+sudo apt update
+
+For YUM/DNF (RHEL/CentOS/Fedora)
+To host your own .rpm packages:
+
+1. Install createrepo
+
+sudo yum install createrepo
+2. Create a repo directory
+
+mkdir -p /var/www/html/myrepo
+cp your-package.rpm /var/www/html/myrepo/
+createrepo /var/www/html/myrepo/
+3. Serve it
+Make sure your web server is running and accessible.
+
+4. Add the repo to clients
+Create /etc/yum.repos.d/myrepo.repo:
+
+ini
+[myrepo]
+name=My Custom Repo
+baseurl=http://yourserver.com/myrepo/
+enabled=1
+gpgcheck=0
+Then run:
+
+sudo yum clean all
+sudo yum repolist
