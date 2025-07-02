@@ -1,10 +1,10 @@
-#!/bin/bash
+!/bin/bash#!/bin/bash
 
 # Variables
-REPO_NAME="myrepo"
+REPO_NAME="repo1"
 REPO_DIR="/var/www/html/$REPO_NAME"
 REPO_CONF="/etc/yum.repos.d/$REPO_NAME.repo"
-RPM_SOURCE_DIR="/path/to/your/rpms"  # <-- Change this to your actual RPM directory
+RPM_SOURCE_DIR="/mnt/repo1"  # <-- Change this to your actual RPM directory
 
 # Ensure script is run as root
 if [[ $EUID -ne 0 ]]; then
@@ -44,4 +44,5 @@ echo "Cleaning DNF cache and refreshing repo list..."
 dnf clean all
 dnf repolist
 
-echo "Repository '$REPO_NAME' is ready and available at http://localhost
+echo "Repository '$REPO_NAME' is ready and available at http://localhost/$REPO_NAME/"
+
